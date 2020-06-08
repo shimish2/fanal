@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"fmt"
 
 	"github.com/aquasecurity/fanal/image/token"
 
@@ -24,10 +25,14 @@ import (
 	"github.com/aquasecurity/fanal/image/daemon"
 	"github.com/aquasecurity/fanal/types"
 	"github.com/aquasecurity/fanal/utils"
+	ispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
+
+var tags [] string
 
 type Image struct {
 	name   string
+	tag    string
 	client v1.Image
 }
 
@@ -137,6 +142,26 @@ func NewArchiveImage(fileName string) (Image, error) {
 	}, nil
 }
 
+func NewOCIImage(fileName string) ([]Image, error) {
+    imgs, err := newOCIImage(fileName)
+    if err != nil {
+        return []Image{}, err
+    }
+
+    var imageList []Image 
+    
+    for i ,img := range imgs {
+        imageList = append(imageList,Image{
+            name:   fileName,
+            tag:    tags[i],
+            client: img,
+        })
+        fmt.Println(tags[i])
+	}
+	
+    return imageList, nil
+}
+
 func newArchiveImage(fileName string) (v1.Image, error) {
 	var result error
 	img, err := tryDockerArchive(fileName)
@@ -154,6 +179,19 @@ func newArchiveImage(fileName string) (v1.Image, error) {
 	result = multierror.Append(result, err)
 
 	return nil, result
+}
+
+func newOCIImage(fileName string) ([]v1.Image, error) {
+    var result error
+
+    imgs, err := tryOCIAllTags(fileName)
+    if err == nil {
+        // Return v1.Image if the directory can be opened as OCI Image Format
+        return imgs, nil
+    }
+    result = multierror.Append(result, err)
+
+    return nil, result
 }
 
 func tryDockerArchive(fileName string) (v1.Image, error) {
@@ -183,6 +221,46 @@ func fileOpener(fileName string) func() (io.ReadCloser, error) {
 		}
 		return ioutil.NopCloser(r), nil
 	}
+}
+
+func tryOCIAllTags(fileName string) ([]v1.Image, error) {
+	lp, err := layout.FromPath(fileName)
+    if err != nil {
+        return nil, xerrors.Errorf("unable to open %s as an OCI Image: %w", fileName, err)
+    }
+
+    index, err := lp.ImageIndex()
+    if err != nil {
+        return nil, xerrors.Errorf("unable to retrieve index.json: %w", err)
+    }
+
+    m, err := index.IndexManifest()
+    if err != nil {
+        return nil, xerrors.Errorf("invalid index.json: %w", err)
+    }
+
+    if len(m.Manifests) == 0 {
+        return nil, xerrors.New("no valid manifest")
+    }
+
+    // Support only first image
+    var imgs []v1.Image
+    tags = make([]string,0)
+    for _, manifest := range m.Manifests {
+        h := manifest.Digest
+        annotation := manifest.Annotations
+        tag := annotation[ispec.AnnotationRefName]
+        tags = append(tags,tag)
+        img, err := index.Image(h)
+        if err != nil {
+            return nil, xerrors.New("invalid OCI image")
+        }
+        imgs = append(imgs,img)
+
+    }
+    
+    return imgs ,nil
+
 }
 
 func tryOCI(fileName string) (v1.Image, error) {
